@@ -1,0 +1,14 @@
+uploads/
+outputs/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.git/
+.env
+venv/
+*.pcap
+*.pcapng
+*.mp4
+*.webm
+*.avi

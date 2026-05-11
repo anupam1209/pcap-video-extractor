@@ -1,0 +1,17 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist uploads and outputs across container restarts
+      - pcap_uploads:/app/uploads
+      - pcap_outputs:/app/outputs
+    environment:
+      MAX_UPLOAD_MB: "500"
+      FILE_TTL_HOURS: "2"
+    restart: unless-stopped
+
+volumes:
+  pcap_uploads:
+  pcap_outputs:
