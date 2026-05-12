@@ -1,12 +1,21 @@
 """
 Core extraction logic shared by the CLI tool and the web app.
+
+H264/H265 extraction uses a two-step approach because GStreamer's muxers (mp4mux,
+matroskamux) fail to write frames reliably when the RTP stream contains in-band
+SPS/PPS negotiation changes (common in video-call recordings). The fix:
+  Step 1 – GStreamer: pcap → rtpXXXdepay → raw Annex-B byte-stream → temp file
+  Step 2 – ffmpeg:   temp file → -c:v copy → final .mp4
+
+All other codecs (VP8/VP9/JPEG/H263) go through a direct single-step GStreamer
+pipeline because their muxers (webmmux, avimux) handle the streams without issue.
 """
 
 import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 
@@ -19,22 +28,32 @@ class CodecConfig:
     ext: str
     clock_rate: int = 90000
     parse: Optional[str] = None
+    # Two-step fields: if raw_caps is set, extract raw bytes then ffmpeg-mux
+    raw_caps: Optional[str] = None        # caps filter after depay (byte-stream)
+    ffmpeg_fmt: Optional[str] = None      # ffmpeg -f <format> for raw input
 
 
 CODECS: Dict[str, CodecConfig] = {
-    # matroskamux (.mkv) accepts H264/H265 in byte-stream format and does not
-    # require SPS/PPS to appear before the first IDR frame, unlike mp4mux.
-    # config-interval=-1 on h264parse tells it to pass frames through even
-    # before it has seen SPS/PPS (it will prepend them to IDR frames once found).
-    "H264":      CodecConfig("rtph264depay",  "matroskamux", "mkv",  parse="h264parse config-interval=-1"),
-    "H265":      CodecConfig("rtph265depay",  "matroskamux", "mkv",  parse="h265parse config-interval=-1"),
-    "VP8":       CodecConfig("rtpvp8depay",   "webmmux",     "webm"),
-    "VP9":       CodecConfig("rtpvp9depay",   "webmmux",     "webm"),
-    "MP4V-ES":   CodecConfig("rtpmp4vdepay",  "matroskamux", "mkv",  parse="mpeg4videoparse"),
-    "JPEG":      CodecConfig("rtpjpegdepay",  "avimux",      "avi"),
-    "H263":      CodecConfig("rtph263depay",  "avimux",      "avi"),
-    "H263-1998": CodecConfig("rtph263pdepay", "avimux",      "avi"),
-    "H261":      CodecConfig("rtph261depay",  "avimux",      "avi"),
+    # H264/H265: two-step via ffmpeg because GStreamer muxers drop frames when
+    # the encoder changes SPS mid-call (resolution/bitrate adaptation).
+    "H264": CodecConfig(
+        depay="rtph264depay", mux="mp4mux", ext="mp4",
+        raw_caps="video/x-h264,stream-format=byte-stream,alignment=au",
+        ffmpeg_fmt="h264",
+    ),
+    "H265": CodecConfig(
+        depay="rtph265depay", mux="mp4mux", ext="mp4",
+        raw_caps="video/x-h265,stream-format=byte-stream,alignment=au",
+        ffmpeg_fmt="hevc",
+    ),
+    # Direct single-step GStreamer pipelines for the rest
+    "VP8":       CodecConfig("rtpvp8depay",   "webmmux", "webm"),
+    "VP9":       CodecConfig("rtpvp9depay",   "webmmux", "webm"),
+    "MP4V-ES":   CodecConfig("rtpmp4vdepay",  "avimux",  "avi",  parse="mpeg4videoparse"),
+    "JPEG":      CodecConfig("rtpjpegdepay",  "avimux",  "avi"),
+    "H263":      CodecConfig("rtph263depay",  "avimux",  "avi"),
+    "H263-1998": CodecConfig("rtph263pdepay", "avimux",  "avi"),
+    "H261":      CodecConfig("rtph261depay",  "avimux",  "avi"),
 }
 
 _VIDEO_CODECS = set(CODECS.keys()) | {"MPV", "MP1S", "MP2T", "BMPEG", "THEORA", "AV1"}
@@ -107,16 +126,11 @@ def parse_sdp_mappings(pcap_file: str) -> Dict[int, dict]:
 # ── Stream detection ───────────────────────────────────────────────────────────
 
 def detect_streams(pcap_file: str) -> List[dict]:
-    """
-    Return a list of stream dicts suitable for JSON serialisation.
-    Each dict includes media type and codec resolved from SDP or heuristics.
-    """
-    # Enable RTP heuristic dissector so tshark decodes UDP-as-RTP even when
-    # ports are non-standard and no Wireshark decode-as hints are present.
+    """Return a list of stream dicts suitable for JSON serialisation."""
     out = _tshark(
         "-r", pcap_file,
         "-o", "rtp.heuristic_rtp:TRUE",
-        "-2",               # two-pass analysis improves protocol identification
+        "-2",
         "-Y", "rtp",
         "-T", "fields",
         "-e", "ip.src",    "-e", "udp.srcport",
@@ -158,7 +172,7 @@ def detect_streams(pcap_file: str) -> List[dict]:
     return list(index.values())
 
 
-# ── Pipeline builder ───────────────────────────────────────────────────────────
+# ── Pipeline builder (for preview and single-step codecs) ─────────────────────
 
 def build_gst_pipeline(
     pcap_file: str,
@@ -169,6 +183,11 @@ def build_gst_pipeline(
     clock_rate: int,
     output_file: str,
 ) -> str:
+    """
+    Build a GStreamer pipeline string.
+    For H264/H265 this produces the raw extraction step (output_file should be
+    the temp path); use extract_rtp_to_file() for the full two-step pipeline.
+    """
     enc = encoding_name.upper()
     cfg = CODECS.get(enc)
     if not cfg:
@@ -186,13 +205,113 @@ def build_gst_pipeline(
         f'"{caps}"',
         cfg.depay,
     ]
-    if cfg.parse:
-        parts.append(cfg.parse)
-    parts += [cfg.mux, f'filesink location="{output_file}"']
-    return "gst-launch-1.0 -ve \\\n    " + " ! \\\n    ".join(parts)
+
+    if cfg.raw_caps:
+        # Raw byte-stream extraction — no mux, just dump bytes to file
+        parts += [f'"{cfg.raw_caps}"', f'filesink location="{output_file}"']
+    else:
+        if cfg.parse:
+            parts.append(cfg.parse)
+        parts += [cfg.mux, f'filesink location="{output_file}"']
+
+    return "gst-launch-1.0 -e \\\n    " + " ! \\\n    ".join(parts)
 
 
-# ── Pipeline runner ────────────────────────────────────────────────────────────
+# ── High-level extractor (GStreamer + optional ffmpeg mux step) ────────────────
+
+def extract_rtp_to_file(
+    pcap_file: str,
+    src_ip: str, src_port: int,
+    dst_ip: str, dst_port: int,
+    payload_type: int,
+    encoding_name: str,
+    clock_rate: int,
+    output_file: str,
+    pkg_config_path: Optional[str] = None,
+    gst_plugin_path: Optional[str] = None,
+    lib_path: Optional[str] = None,
+) -> Tuple[int, str]:
+    """
+    Extract one RTP stream from a PCAP file to a video file.
+    Returns (returncode, combined_log).
+    """
+    enc = encoding_name.upper()
+    cfg = CODECS.get(enc)
+    if not cfg:
+        return -1, f"Unsupported codec '{enc}'. Supported: {', '.join(CODECS)}"
+
+    if cfg.raw_caps and cfg.ffmpeg_fmt:
+        return _extract_two_step(
+            pcap_file, src_ip, src_port, dst_ip, dst_port,
+            payload_type, enc, clock_rate, output_file, cfg,
+            pkg_config_path, gst_plugin_path, lib_path,
+        )
+
+    # Single-step: direct GStreamer mux
+    pipeline = build_gst_pipeline(
+        pcap_file, src_ip, src_port, dst_ip, dst_port,
+        payload_type, enc, clock_rate, output_file,
+    )
+    return run_gst_pipeline(pipeline, pkg_config_path, gst_plugin_path, lib_path)
+
+
+def _extract_two_step(
+    pcap_file: str,
+    src_ip: str, src_port: int,
+    dst_ip: str, dst_port: int,
+    payload_type: int,
+    enc: str,
+    clock_rate: int,
+    output_file: str,
+    cfg: CodecConfig,
+    pkg_config_path: Optional[str],
+    gst_plugin_path: Optional[str],
+    lib_path: Optional[str],
+) -> Tuple[int, str]:
+    """Two-step extraction for H264/H265: GStreamer → raw bytes → ffmpeg → MP4."""
+    tmp_file = output_file + f".tmp.{enc.lower()}"
+    log_parts: List[str] = []
+
+    try:
+        # Step 1: GStreamer raw byte-stream extraction
+        gst_cmd = build_gst_pipeline(
+            pcap_file, src_ip, src_port, dst_ip, dst_port,
+            payload_type, enc, clock_rate, tmp_file,
+        )
+        log_parts.append(f"=== Step 1: GStreamer raw extraction ===\n{gst_cmd}\n")
+        rc, gst_log = run_gst_pipeline(gst_cmd, pkg_config_path, gst_plugin_path, lib_path)
+        log_parts.append(gst_log)
+
+        if rc != 0:
+            return rc, "\n".join(log_parts)
+
+        tmp_size = os.path.getsize(tmp_file) if os.path.exists(tmp_file) else 0
+        if tmp_size == 0:
+            return -1, "\n".join(log_parts) + "\nGStreamer produced an empty raw file."
+
+        # Step 2: ffmpeg remux into final container
+        ffmpeg_cmd = (
+            f'ffmpeg -y -f {cfg.ffmpeg_fmt} -i "{tmp_file}" '
+            f'-c:v copy "{output_file}" 2>&1'
+        )
+        log_parts.append(f"\n=== Step 2: ffmpeg remux ===\n{ffmpeg_cmd}\n")
+        try:
+            result = subprocess.run(
+                ffmpeg_cmd, shell=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=300,
+            )
+            log_parts.append(result.stdout)
+            return result.returncode, "\n".join(log_parts)
+        except subprocess.TimeoutExpired:
+            return -1, "\n".join(log_parts) + "\nffmpeg timed out after 300 s."
+
+    finally:
+        if os.path.exists(tmp_file):
+            os.unlink(tmp_file)
+
+
+# ── Low-level GStreamer runner ─────────────────────────────────────────────────
 
 def run_gst_pipeline(
     pipeline: str,
@@ -200,7 +319,7 @@ def run_gst_pipeline(
     gst_plugin_path: Optional[str] = None,
     lib_path: Optional[str] = None,
 ) -> Tuple[int, str]:
-    """Run the pipeline. Returns (returncode, combined_output)."""
+    """Run a gst-launch pipeline string. Returns (returncode, combined_output)."""
     env = os.environ.copy()
     if pkg_config_path:
         env["PKG_CONFIG_PATH"] = f"{pkg_config_path}:{env.get('PKG_CONFIG_PATH', '')}"
@@ -208,7 +327,6 @@ def run_gst_pipeline(
         env["GST_PLUGIN_PATH"] = gst_plugin_path
     if lib_path:
         env["LD_LIBRARY_PATH"] = f"{lib_path}:{env.get('LD_LIBRARY_PATH', '')}"
-    # GST_DEBUG=3 captures element errors/warnings without flooding with trace output.
     env.setdefault("GST_DEBUG", "3")
 
     try:
@@ -219,5 +337,5 @@ def run_gst_pipeline(
         )
         return result.returncode, result.stdout
     except subprocess.TimeoutExpired as e:
-        output = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        return -1, f"Pipeline timed out after 600 s.\n{output}"
+        out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        return -1, f"Pipeline timed out after 600 s.\n{out}"

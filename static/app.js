@@ -2,11 +2,11 @@
 
 // ── Supported codecs (must match backend CODECS dict) ─────────────────────────
 const CODECS = [
-  { value: 'H264',      label: 'H.264 (AVC)',       ext: 'mkv'  },
-  { value: 'H265',      label: 'H.265 (HEVC)',       ext: 'mkv'  },
+  { value: 'H264',      label: 'H.264 (AVC)',       ext: 'mp4'  },
+  { value: 'H265',      label: 'H.265 (HEVC)',       ext: 'mp4'  },
   { value: 'VP8',       label: 'VP8',                ext: 'webm' },
   { value: 'VP9',       label: 'VP9',                ext: 'webm' },
-  { value: 'MP4V-ES',   label: 'MPEG-4 Visual',      ext: 'mkv'  },
+  { value: 'MP4V-ES',   label: 'MPEG-4 Visual',      ext: 'avi'  },
   { value: 'JPEG',      label: 'Motion JPEG',        ext: 'avi'  },
   { value: 'H263',      label: 'H.263',              ext: 'avi'  },
   { value: 'H263-1998', label: 'H.263+ (1998)',      ext: 'avi'  },

@@ -17,6 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
+    # ffmpeg: used to remux raw H264/H265 byte-streams into MP4 containers
+    ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
 # Allow tshark to read pcap files without root (dumpcap needs this group)

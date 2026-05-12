@@ -19,6 +19,7 @@ from extractor import (
     CODECS,
     build_gst_pipeline,
     detect_streams,
+    extract_rtp_to_file,
     run_gst_pipeline,
     tool_available,
 )
@@ -86,8 +87,9 @@ class ExtractRequest(BaseModel):
 @app.get("/api/health")
 def health():
     return {
-        "tshark":     tool_available("tshark"),
-        "gstreamer":  tool_available("gst-launch-1.0"),
+        "tshark":        tool_available("tshark"),
+        "gstreamer":     tool_available("gst-launch-1.0"),
+        "ffmpeg":        tool_available("ffmpeg"),
         "max_upload_mb": MAX_UPLOAD_BYTES // 1024 ** 2,
     }
 
@@ -309,21 +311,18 @@ def _run_job(
 
         output_path = os.path.join(out_dir, st["filename"])
 
-        try:
-            pipeline = build_gst_pipeline(
-                pcap_file=pcap_file,
-                src_ip=s.src_ip,   src_port=s.src_port,
-                dst_ip=s.dst_ip,   dst_port=s.dst_port,
-                payload_type=s.payload_type,
-                encoding_name=s.encoding_name,
-                clock_rate=s.clock_rate,
-                output_file=output_path,
-            )
-            rc, log = run_gst_pipeline(
-                pipeline, pkg_config_path, gst_plugin_path, lib_path
-            )
-        except ValueError as e:
-            rc, log = -1, str(e)
+        rc, log = extract_rtp_to_file(
+            pcap_file=pcap_file,
+            src_ip=s.src_ip,   src_port=s.src_port,
+            dst_ip=s.dst_ip,   dst_port=s.dst_port,
+            payload_type=s.payload_type,
+            encoding_name=s.encoding_name,
+            clock_rate=s.clock_rate,
+            output_file=output_path,
+            pkg_config_path=pkg_config_path,
+            gst_plugin_path=gst_plugin_path,
+            lib_path=lib_path,
+        )
 
         file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
         with _lock:
