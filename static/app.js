@@ -2,11 +2,11 @@
 
 // ── Supported codecs (must match backend CODECS dict) ─────────────────────────
 const CODECS = [
-  { value: 'H264',      label: 'H.264 (AVC)',       ext: 'mp4'  },
-  { value: 'H265',      label: 'H.265 (HEVC)',       ext: 'mp4'  },
+  { value: 'H264',      label: 'H.264 (AVC)',       ext: 'mkv'  },
+  { value: 'H265',      label: 'H.265 (HEVC)',       ext: 'mkv'  },
   { value: 'VP8',       label: 'VP8',                ext: 'webm' },
   { value: 'VP9',       label: 'VP9',                ext: 'webm' },
-  { value: 'MP4V-ES',   label: 'MPEG-4 Visual',      ext: 'mp4'  },
+  { value: 'MP4V-ES',   label: 'MPEG-4 Visual',      ext: 'mkv'  },
   { value: 'JPEG',      label: 'Motion JPEG',        ext: 'avi'  },
   { value: 'H263',      label: 'H.263',              ext: 'avi'  },
   { value: 'H263-1998', label: 'H.263+ (1998)',      ext: 'avi'  },
@@ -322,7 +322,7 @@ async function pollJob() {
         failed:    `<i class="fa-solid fa-circle-xmark text-danger"></i>`,
       }[s.status] || '';
 
-      const logBtn = s.status === 'failed' && s.log
+      const logBtn = s.status === 'failed'
         ? `<button class="btn btn-link btn-sm p-0 ms-2 text-danger"
                    onclick="showLog(${s.index})">view log</button>`
         : '';
@@ -344,11 +344,17 @@ async function pollJob() {
 }
 
 function showLog(streamIdx) {
-  fetch(`/api/job/${state.jobId}`)
+  fetch(`/api/log/${state.jobId}/${streamIdx}`)
     .then(r => r.json())
-    .then(job => {
-      const s = job.streams[streamIdx];
-      alert(`GStreamer log for stream ${streamIdx}:\n\n${s.log || '(empty)'}`);
+    .then(data => {
+      $('log-modal-title').textContent = `GStreamer log — stream ${streamIdx}`;
+      $('log-modal-body').textContent  = data.log || '(no output captured)';
+      new bootstrap.Modal($('log-modal')).show();
+    })
+    .catch(() => {
+      $('log-modal-title').textContent = 'Error';
+      $('log-modal-body').textContent  = 'Failed to fetch log.';
+      new bootstrap.Modal($('log-modal')).show();
     });
 }
 
@@ -378,6 +384,8 @@ function renderDownloads(job) {
     <div class="download-failed">
       <i class="fa-solid fa-triangle-exclamation me-2"></i>
       Stream ${e.stream_index} failed: ${e.message}
+      <button class="btn btn-link btn-sm p-0 ms-2 text-danger"
+              onclick="showLog(${e.stream_index})">view log</button>
     </div>`).join('');
 
   cont.innerHTML = successItems + errorItems ||

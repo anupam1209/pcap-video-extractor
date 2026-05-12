@@ -22,15 +22,19 @@ class CodecConfig:
 
 
 CODECS: Dict[str, CodecConfig] = {
-    "H264":      CodecConfig("rtph264depay",  "mp4mux",  "mp4",  parse="h264parse"),
-    "H265":      CodecConfig("rtph265depay",  "mp4mux",  "mp4",  parse="h265parse"),
-    "VP8":       CodecConfig("rtpvp8depay",   "webmmux", "webm"),
-    "VP9":       CodecConfig("rtpvp9depay",   "webmmux", "webm"),
-    "MP4V-ES":   CodecConfig("rtpmp4vdepay",  "mp4mux",  "mp4",  parse="mpeg4videoparse"),
-    "JPEG":      CodecConfig("rtpjpegdepay",  "avimux",  "avi"),
-    "H263":      CodecConfig("rtph263depay",  "avimux",  "avi"),
-    "H263-1998": CodecConfig("rtph263pdepay", "avimux",  "avi"),
-    "H261":      CodecConfig("rtph261depay",  "avimux",  "avi"),
+    # matroskamux (.mkv) accepts H264/H265 in byte-stream format and does not
+    # require SPS/PPS to appear before the first IDR frame, unlike mp4mux.
+    # config-interval=-1 on h264parse tells it to pass frames through even
+    # before it has seen SPS/PPS (it will prepend them to IDR frames once found).
+    "H264":      CodecConfig("rtph264depay",  "matroskamux", "mkv",  parse="h264parse config-interval=-1"),
+    "H265":      CodecConfig("rtph265depay",  "matroskamux", "mkv",  parse="h265parse config-interval=-1"),
+    "VP8":       CodecConfig("rtpvp8depay",   "webmmux",     "webm"),
+    "VP9":       CodecConfig("rtpvp9depay",   "webmmux",     "webm"),
+    "MP4V-ES":   CodecConfig("rtpmp4vdepay",  "matroskamux", "mkv",  parse="mpeg4videoparse"),
+    "JPEG":      CodecConfig("rtpjpegdepay",  "avimux",      "avi"),
+    "H263":      CodecConfig("rtph263depay",  "avimux",      "avi"),
+    "H263-1998": CodecConfig("rtph263pdepay", "avimux",      "avi"),
+    "H261":      CodecConfig("rtph261depay",  "avimux",      "avi"),
 }
 
 _VIDEO_CODECS = set(CODECS.keys()) | {"MPV", "MP1S", "MP2T", "BMPEG", "THEORA", "AV1"}
@@ -204,9 +208,16 @@ def run_gst_pipeline(
         env["GST_PLUGIN_PATH"] = gst_plugin_path
     if lib_path:
         env["LD_LIBRARY_PATH"] = f"{lib_path}:{env.get('LD_LIBRARY_PATH', '')}"
+    # GST_DEBUG=3 captures element errors/warnings without flooding with trace output.
+    env.setdefault("GST_DEBUG", "3")
 
-    result = subprocess.run(
-        pipeline, shell=True, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
-    return result.returncode, result.stdout
+    try:
+        result = subprocess.run(
+            pipeline, shell=True, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=600,
+        )
+        return result.returncode, result.stdout
+    except subprocess.TimeoutExpired as e:
+        output = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        return -1, f"Pipeline timed out after 600 s.\n{output}"

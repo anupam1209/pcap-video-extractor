@@ -252,6 +252,21 @@ def job_status(job_id: str):
     return job
 
 
+# ── API: stream log ───────────────────────────────────────────────────────────
+
+@app.get("/api/log/{job_id}/{stream_index}")
+def stream_log(job_id: str, stream_index: int):
+    with _lock:
+        job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found.")
+    streams = job.get("streams", [])
+    if stream_index >= len(streams):
+        raise HTTPException(404, "Stream index out of range.")
+    s = streams[stream_index]
+    return {"log": s.get("log", ""), "status": s.get("status", ""), "filename": s.get("filename", "")}
+
+
 # ── API: download ──────────────────────────────────────────────────────────────
 
 @app.get("/api/download/{job_id}/{filename}")
@@ -310,22 +325,28 @@ def _run_job(
         except ValueError as e:
             rc, log = -1, str(e)
 
+        file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
         with _lock:
             _jobs[job_id]["done"] += 1
-            if rc == 0 and os.path.exists(output_path):
+            if rc == 0 and file_size > 0:
                 _jobs[job_id]["streams"][i]["status"] = "completed"
                 _jobs[job_id]["outputs"].append({
                     "stream_index": i,
                     "filename":     st["filename"],
-                    "size":         os.path.getsize(output_path),
+                    "size":         file_size,
                     "job_id":       job_id,
                 })
             else:
+                reason = (
+                    f"GStreamer exited with code {rc}"
+                    if rc != 0 else
+                    "GStreamer succeeded but output file is empty (stream may have no keyframes)"
+                )
                 _jobs[job_id]["streams"][i]["status"] = "failed"
-                _jobs[job_id]["streams"][i]["log"]    = log[-2000:]
+                _jobs[job_id]["streams"][i]["log"]    = log  # full log, not truncated
                 _jobs[job_id]["errors"].append({
                     "stream_index": i,
-                    "message":      f"GStreamer exited with code {rc}",
+                    "message":      reason,
                 })
 
     with _lock:
